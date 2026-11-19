@@ -21,12 +21,12 @@ func TestMirroringOn100(t *testing.T) {
 	})
 	pool := safe.NewPool(t.Context())
 	mirror := New(handler, pool, true, defaultMaxBodySize, false, nil)
-	err := mirror.AddMirror(http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
+	err := mirror.AddMirror("test-mirror", http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
 		atomic.AddInt32(&countMirror1, 1)
 	}), 10, 100)
 	assert.NoError(t, err)
 
-	err = mirror.AddMirror(http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
+	err = mirror.AddMirror("test-mirror", http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
 		atomic.AddInt32(&countMirror2, 1)
 	}), 50, 100)
 	assert.NoError(t, err)
@@ -50,12 +50,12 @@ func TestMirroringOn10(t *testing.T) {
 	})
 	pool := safe.NewPool(t.Context())
 	mirror := New(handler, pool, true, defaultMaxBodySize, false, nil)
-	err := mirror.AddMirror(http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
+	err := mirror.AddMirror("test-mirror", http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
 		atomic.AddInt32(&countMirror1, 1)
 	}), 10, 100)
 	assert.NoError(t, err)
 
-	err = mirror.AddMirror(http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
+	err = mirror.AddMirror("test-mirror", http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
 		atomic.AddInt32(&countMirror2, 1)
 	}), 50, 100)
 	assert.NoError(t, err)
@@ -74,19 +74,19 @@ func TestMirroringOn10(t *testing.T) {
 
 func TestInvalidPercent(t *testing.T) {
 	mirror := New(http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {}), safe.NewPool(t.Context()), true, defaultMaxBodySize, false, nil)
-	err := mirror.AddMirror(nil, -1, 100)
+	err := mirror.AddMirror("test-mirror", nil, -1, 100)
 	assert.Error(t, err)
 
-	err = mirror.AddMirror(nil, 101, 100)
+	err = mirror.AddMirror("test-mirror", nil, 101, 100)
 	assert.Error(t, err)
 
-	err = mirror.AddMirror(nil, 0, 0)
+	err = mirror.AddMirror("test-mirror", nil, 0, 0)
 	assert.Error(t, err)
 
-	err = mirror.AddMirror(nil, 100, 100)
+	err = mirror.AddMirror("test-mirror", nil, 100, 100)
 	assert.NoError(t, err)
 
-	err = mirror.AddMirror(nil, 0, 100)
+	err = mirror.AddMirror("test-mirror", nil, 0, 100)
 	assert.NoError(t, err)
 }
 
@@ -98,7 +98,7 @@ func TestHijack(t *testing.T) {
 	mirror := New(handler, pool, true, defaultMaxBodySize, false, nil)
 
 	var mirrorRequest bool
-	err := mirror.AddMirror(http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
+	err := mirror.AddMirror("test-mirror", http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
 		hijacker, ok := rw.(http.Hijacker)
 		assert.True(t, ok)
 
@@ -122,7 +122,7 @@ func TestFlush(t *testing.T) {
 	mirror := New(handler, pool, true, defaultMaxBodySize, false, nil)
 
 	var mirrorRequest bool
-	err := mirror.AddMirror(http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
+	err := mirror.AddMirror("test-mirror", http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
 		hijacker, ok := rw.(http.Flusher)
 		assert.True(t, ok)
 
@@ -159,7 +159,7 @@ func TestMirroringWithBody(t *testing.T) {
 	mirror := New(handler, pool, true, defaultMaxBodySize, false, nil)
 
 	for range numMirrors {
-		err := mirror.AddMirror(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
+		err := mirror.AddMirror("test-mirror", http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
 			assert.NotNil(t, r.Body)
 			bb, err := io.ReadAll(r.Body)
 			assert.NoError(t, err)
@@ -201,7 +201,7 @@ func TestMirroringWithIgnoredBody(t *testing.T) {
 	mirror := New(handler, pool, false, defaultMaxBodySize, false, nil)
 
 	for range numMirrors {
-		err := mirror.AddMirror(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
+		err := mirror.AddMirror("test-mirror", http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
 			assert.NotNil(t, r.Body)
 			bb, err := io.ReadAll(r.Body)
 			assert.NoError(t, err)

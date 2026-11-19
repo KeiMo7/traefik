@@ -559,6 +559,10 @@ These are distinct from load balancing strategies - they operate at the **servic
 The `weighted` service type load balances requests between multiple services based on weights.
 This is different from the `wrr` strategy - it operates on services, not servers.
 
+Weights are relative proportions: with weights `3` and `1`, the first service receives three quarters of the requests and the second one quarter.
+A non-positive weight (zero or negative) is rejected when the configuration is loaded, instead of silently excluding the service and skewing the proportions of the remaining ones.
+When a child service is reported as unhealthy (see [Health Check](#health-check_1)), it is excluded and its share is redistributed across the healthy children, in proportion to their weights.
+
 !!! info "Supported Providers"
 
     This service type can be defined currently with the [File](../../../install-configuration/providers/others/file.md) provider or [IngressRoute](../../../routing-configuration/kubernetes/crd/http/ingressroute.md).
@@ -820,6 +824,15 @@ and the body is streamed to the mirrors while the main service reads it.
 A mirror falling more than 1 MiB behind the main service is aborted, so that it never slows the main request down,
 and a mirrored request is aborted when the main service does not read the whole body.
 The `streamBody` option has no effect when `mirrorBody` is false, and cannot be used with `maxBodySize`.
+
+Every request sent to a mirror carries the `X-Traefik-Mirrored-Request: true` header,
+so that shadow services can distinguish mirrored traffic from real traffic.
+The header is only added to the mirrored copy of the request; the request sent to the main service is unchanged.
+
+When `healthCheck` is enabled on the mirroring service, a mirror reported as unhealthy automatically stops receiving mirrored requests,
+while the main service keeps answering every request.
+Mirroring resumes as soon as the mirror becomes healthy again, without replaying the requests that were skipped while it was down.
+If every mirror is unhealthy, mirroring is effectively disabled until at least one of them recovers.
 
 !!! warning "Default behavior of `percent`"
 

@@ -312,10 +312,28 @@ func (m *Manager) getMirrorServiceHandler(ctx context.Context, config *dynamic.M
 			return nil, err
 		}
 
-		err = handler.AddMirror(mirrorHandler, int64(mirrorConfig.Percent), 100)
+		err = handler.AddMirror(mirrorConfig.Name, mirrorHandler, int64(mirrorConfig.Percent), 100)
 		if err != nil {
 			return nil, err
 		}
+
+		if config.HealthCheck == nil {
+			continue
+		}
+
+		updater, ok := mirrorHandler.(healthcheck.StatusUpdater)
+		if !ok {
+			return nil, fmt.Errorf("mirror service %v not a healthcheck.StatusUpdater (%T)", mirrorConfig.Name, mirrorHandler)
+		}
+
+		if err := updater.RegisterStatusUpdater(func(up bool) {
+			handler.SetMirrorStatus(ctx, mirrorConfig.Name, up)
+		}); err != nil {
+			return nil, fmt.Errorf("cannot register %v as mirror status updater: %w", mirrorConfig.Name, err)
+		}
+
+		log.Ctx(ctx).Debug().Str("mirror", mirrorConfig.Name).
+			Msg("Mirror service will update parent on status change")
 	}
 	return handler, nil
 }
@@ -324,6 +342,14 @@ func (m *Manager) getWRRServiceHandler(ctx context.Context, serviceName string, 
 	// TODO Handle accesslog and metrics with multiple service name
 	if config.Sticky != nil && config.Sticky.Cookie != nil {
 		config.Sticky.Cookie.Name = cookie.GetName(config.Sticky.Cookie.Name, serviceName)
+	}
+
+	// Validate weights at build time instead of letting wrr.Balancer silently
+	// ignore non-positive weights, which would skew the configured proportions.
+	for _, svc := range config.Services {
+		if svc.Weight != nil && *svc.Weight <= 0 {
+			return nil, fmt.Errorf("the service %q has an invalid weight %d: weight must be a positive integer", svc.Name, *svc.Weight)
+		}
 	}
 
 	balancer := wrr.New(config.Sticky, config.HealthCheck != nil)

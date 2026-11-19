@@ -71,7 +71,7 @@ func TestMirroringFraction(t *testing.T) {
 			var mirrored atomic.Int32
 			pool := safe.NewPool(t.Context())
 			mirror := New(http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {}), pool, true, -1, true, nil)
-			err := mirror.AddMirror(http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
+			err := mirror.AddMirror("test-mirror", http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
 				mirrored.Add(1)
 			}), test.numerator, test.denominator)
 			require.NoError(t, err)
@@ -97,7 +97,7 @@ func TestStreaming_handlersDoNotAlterMirroredRequest(t *testing.T) {
 
 	pool := safe.NewPool(t.Context())
 	mirror := New(next, pool, true, -1, true, nil)
-	require.NoError(t, mirror.AddMirror(readingMirror(results), 1, 1))
+	require.NoError(t, mirror.AddMirror("test-mirror", readingMirror(results), 1, 1))
 
 	req := httptest.NewRequest(http.MethodGet, "http://foo.com/bar", http.NoBody)
 	req.Header.Set("X-Foo", "original")
@@ -123,8 +123,8 @@ func TestStreaming_body(t *testing.T) {
 	results := make(chan mirrorResult, 2)
 	pool := safe.NewPool(t.Context())
 	mirror := New(next, pool, true, -1, true, nil)
-	require.NoError(t, mirror.AddMirror(readingMirror(results), 1, 1))
-	require.NoError(t, mirror.AddMirror(readingMirror(results), 1, 1))
+	require.NoError(t, mirror.AddMirror("test-mirror", readingMirror(results), 1, 1))
+	require.NoError(t, mirror.AddMirror("test-mirror", readingMirror(results), 1, 1))
 
 	req := httptest.NewRequest(http.MethodPost, "http://foo.com/bar", bytes.NewReader(body))
 	req.Header.Set("Expect", "100-continue")
@@ -160,7 +160,7 @@ func TestStreaming_bodyNotBuffered(t *testing.T) {
 	results := make(chan mirrorResult, 1)
 	pool := safe.NewPool(t.Context())
 	mirror := New(next, pool, true, -1, true, nil)
-	require.NoError(t, mirror.AddMirror(readingMirror(results), 1, 1))
+	require.NoError(t, mirror.AddMirror("test-mirror", readingMirror(results), 1, 1))
 
 	bodyReader, bodyWriter := io.Pipe()
 	req := httptest.NewRequest(http.MethodPost, "http://foo.com/bar", bodyReader)
@@ -205,7 +205,7 @@ func TestStreaming_slowMirror(t *testing.T) {
 
 	pool := safe.NewPool(t.Context())
 	mirror := New(next, pool, true, -1, true, nil)
-	require.NoError(t, mirror.AddMirror(slowMirror, 1, 1))
+	require.NoError(t, mirror.AddMirror("test-mirror", slowMirror, 1, 1))
 
 	body := strings.Repeat("a", 2*streamingBufferSize)
 	mirror.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "http://foo.com/bar", strings.NewReader(body)))
@@ -240,7 +240,7 @@ func TestStreaming_readLargerThanBuffer(t *testing.T) {
 	results := make(chan mirrorResult, 1)
 	pool := safe.NewPool(t.Context())
 	mirror := New(next, pool, true, -1, true, nil)
-	require.NoError(t, mirror.AddMirror(readingMirror(results), 1, 1))
+	require.NoError(t, mirror.AddMirror("test-mirror", readingMirror(results), 1, 1))
 
 	mirror.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "http://foo.com/bar", strings.NewReader(body)))
 
@@ -267,7 +267,7 @@ func TestStreaming_bodyNotFullyRead(t *testing.T) {
 
 	pool := safe.NewPool(t.Context())
 	mirror := New(next, pool, true, -1, true, nil)
-	require.NoError(t, mirror.AddMirror(waitingMirror, 1, 1))
+	require.NoError(t, mirror.AddMirror("test-mirror", waitingMirror, 1, 1))
 
 	mirror.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "http://foo.com/bar", strings.NewReader("12345")))
 	close(served)
@@ -290,7 +290,7 @@ func TestStreaming_unknownLengthEmptyBody(t *testing.T) {
 	results := make(chan mirrorResult, 1)
 	pool := safe.NewPool(t.Context())
 	mirror := New(next, pool, true, -1, true, nil)
-	require.NoError(t, mirror.AddMirror(readingMirror(results), 1, 1))
+	require.NoError(t, mirror.AddMirror("test-mirror", readingMirror(results), 1, 1))
 
 	req := httptest.NewRequest(http.MethodGet, "http://foo.com/bar", io.NopCloser(strings.NewReader("")))
 	req.ContentLength = -1
@@ -369,7 +369,7 @@ func TestStreaming_proxiedMirror(t *testing.T) {
 
 			pool := safe.NewPool(t.Context())
 			mirror := New(next, pool, true, -1, true, nil)
-			require.NoError(t, mirror.AddMirror(proxyMirror, 1, 1))
+			require.NoError(t, mirror.AddMirror("test-mirror", proxyMirror, 1, 1))
 
 			req := httptest.NewRequest(http.MethodPost, "http://foo.com/bar", io.NopCloser(strings.NewReader("hello world")))
 			req.ContentLength = -1

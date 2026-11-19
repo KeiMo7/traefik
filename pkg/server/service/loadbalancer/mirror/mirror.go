@@ -19,6 +19,10 @@ import (
 	"github.com/traefik/traefik/v3/pkg/safe"
 )
 
+// HeaderMirroredRequest is set on every request sent to a mirror service,
+// so that shadow services can distinguish mirrored traffic from real traffic.
+const HeaderMirroredRequest = "X-Traefik-Mirrored-Request"
+
 // Mirroring is an http.Handler that can mirror requests.
 type Mirroring struct {
 	handler        http.Handler
@@ -57,11 +61,16 @@ func New(handler http.Handler, pool *safe.Pool, mirrorBody bool, maxBodySize int
 type mirrorHandler struct {
 	http.Handler
 
+	name string
+
 	numerator   int64
 	denominator int64
 
 	lock  sync.RWMutex
 	count int64
+	// up reports the mirror child health. Mirrors are considered UP until a
+	// health check reports otherwise through SetMirrorStatus.
+	up bool
 }
 
 type clonableRequest interface {
@@ -69,7 +78,7 @@ type clonableRequest interface {
 }
 
 func (m *Mirroring) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
-	mirrors := m.getActiveMirrors()
+	mirrors := m.getActiveMirrors(req.Context())
 	if len(mirrors) == 0 {
 		m.handler.ServeHTTP(rw, req)
 		return
@@ -116,6 +125,7 @@ func (m *Mirroring) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 		for _, handler := range mirrors {
 			// prepare request, update body from buffer
 			r := rr.Clone(req.Context())
+			r.Header.Set(HeaderMirroredRequest, "true")
 
 			handler.ServeHTTP(m.rw, r.WithContext(mirrorContext(r.Context())))
 		}
@@ -146,12 +156,48 @@ func mirrorContext(ctx context.Context) context.Context {
 }
 
 // AddMirror adds an httpHandler to mirror numerator out of denominator requests to.
-func (m *Mirroring) AddMirror(handler http.Handler, numerator, denominator int64) error {
+// The name is used in logs and health status updates to identify the mirror.
+func (m *Mirroring) AddMirror(name string, handler http.Handler, numerator, denominator int64) error {
 	if denominator <= 0 || numerator < 0 || numerator > denominator {
 		return fmt.Errorf("invalid fraction %d/%d: the denominator must be positive, and the numerator between 0 and the denominator", numerator, denominator)
 	}
-	m.mirrorHandlers = append(m.mirrorHandlers, &mirrorHandler{Handler: handler, numerator: numerator, denominator: denominator})
+	m.mirrorHandlers = append(m.mirrorHandlers, &mirrorHandler{
+		Handler:     handler,
+		name:        name,
+		numerator:   numerator,
+		denominator: denominator,
+		up:          true,
+	})
 	return nil
+}
+
+// SetMirrorStatus updates the health status of the mirror child called name.
+// A mirror reported as down stops receiving mirrored requests, while the main
+// request keeps being served normally. When every mirror is down mirroring is
+// effectively disabled until at least one mirror recovers.
+func (m *Mirroring) SetMirrorStatus(ctx context.Context, name string, up bool) {
+	for _, handler := range m.mirrorHandlers {
+		if handler.name != name {
+			continue
+		}
+
+		handler.lock.Lock()
+		if handler.up == up {
+			handler.lock.Unlock()
+			return
+		}
+		handler.up = up
+		handler.lock.Unlock()
+
+		status := "DOWN"
+		if up {
+			status = "UP"
+		}
+		log.Ctx(ctx).Info().Str("mirror", name).Msgf("Mirror service status changed to %s", status)
+		return
+	}
+
+	log.Ctx(ctx).Warn().Str("mirror", name).Msg("Received a status update for an unknown mirror service")
 }
 
 // RegisterStatusUpdater adds fn to the list of hooks that are run when the
@@ -189,6 +235,7 @@ func (m *Mirroring) serveStreamBody(rw http.ResponseWriter, req *http.Request, m
 		// The mirrored requests are cloned before calling the main handler,
 		// so that the handlers it chains to do not alter them.
 		mirrorReq := req.Clone(mirrorContext(req.Context()))
+		mirrorReq.Header.Set(HeaderMirroredRequest, "true")
 
 		// The body is streamed while the main handler reads it,
 		// so the mirrored request must not wait for an interim response before sending it.
@@ -228,19 +275,29 @@ func (m *Mirroring) inc() int64 {
 	return m.total
 }
 
-func (m *Mirroring) getActiveMirrors() []http.Handler {
+func (m *Mirroring) getActiveMirrors(ctx context.Context) []http.Handler {
 	total := m.inc()
 
 	var mirrors []http.Handler
 	for _, handler := range m.mirrorHandlers {
 		handler.lock.Lock()
-		if handler.count*handler.denominator < total*handler.numerator {
+		// The virtual counter of a down mirror is advanced as well: when it
+		// recovers, it must not catch up on all the mirrors it missed, which
+		// would produce a burst of mirrored traffic against a freshly restarted service.
+		due := handler.count*handler.denominator < total*handler.numerator
+		if due {
 			handler.count++
-			handler.lock.Unlock()
-			mirrors = append(mirrors, handler)
-		} else {
-			handler.lock.Unlock()
 		}
+		up := handler.up
+		handler.lock.Unlock()
+
+		if due && up {
+			mirrors = append(mirrors, handler)
+		}
+	}
+
+	if len(m.mirrorHandlers) > 0 && len(mirrors) == 0 {
+		log.Ctx(ctx).Debug().Msg("No healthy mirror service available, skipping mirroring for this request")
 	}
 	return mirrors
 }

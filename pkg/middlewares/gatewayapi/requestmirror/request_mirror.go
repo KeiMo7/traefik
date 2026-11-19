@@ -37,7 +37,7 @@ func NewRequestMirror(ctx context.Context, next http.Handler, conf dynamic.Reque
 	// The body is streamed rather than buffered, as the Gateway API does not allow to bound the buffered body size,
 	// and the mirrored request is cloned before calling next, as the filters declared after this one must not alter it.
 	handler := mirror.New(next, pool, true, -1, true, nil)
-	if err := handler.AddMirror(mirrorHandler, conf.Numerator, conf.Denominator); err != nil {
+	if err := handler.AddMirror(conf.Service, mirrorHandler, conf.Numerator, conf.Denominator); err != nil {
 		return nil, fmt.Errorf("adding mirror service %q: %w", conf.Service, err)
 	}
 

@@ -167,6 +167,13 @@ func (b *Balancer) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 				h.ServeHTTP(rw, req)
 				return
 			}
+
+			// The backend the session is pinned to has disappeared or is unhealthy:
+			// fall through to a weighted re-pick and log the reassignment so that
+			// sessions are not silently failing or stuck on a dead version.
+			log.Ctx(req.Context()).Warn().
+				Str("stickyHandler", h.Name).
+				Msg("Sticky session reassigned: pinned backend is unavailable, selecting a healthy one")
 		}
 	}
 
