@@ -117,7 +117,7 @@ func (m *Manager) UpdateConfigs(ctx context.Context, stores map[string]Store, co
 		m.storesConfig[tlsalpn01.ACMETLS1Protocol] = Store{}
 	}
 
-	storesCertificates := make(map[string]map[string]*CertificateData)
+	storesCertificates := make(map[string]*certificateStoreBuilder)
 
 	// Define the TTL for all the cache entries with no TTL.
 	// This will discard entries that are not used anymore.
@@ -169,19 +169,25 @@ func (m *Manager) UpdateConfigs(ctx context.Context, stores map[string]Store, co
 				m.storesConfig[store] = Store{}
 			}
 
-			appendCertificate(storesCertificates, SANs, store, certData)
+			builder, ok := storesCertificates[store]
+			if !ok {
+				builder = &certificateStoreBuilder{}
+				storesCertificates[store] = builder
+			}
+
+			builder.add(store, certData, SANs)
 		}
 	}
 
+	// The stores are replaced as a whole below, so that a configuration update
+	// is either fully visible or not visible at all to the handshakes in progress.
 	m.stores = make(map[string]*CertificateStore)
 
 	for storeName, storeConfig := range m.storesConfig {
 		st := NewCertificateStore(m.ocspStapler)
 		m.stores[storeName] = st
 
-		if certs, ok := storesCertificates[storeName]; ok {
-			st.DynamicCerts.Set(certs)
-		}
+		st.setDynamicCertificates(storesCertificates[storeName].set())
 
 		// a default cert for the ACME store does not make any sense, so generating one is a waste.
 		if storeName == tlsalpn01.ACMETLS1Protocol {
@@ -252,9 +258,17 @@ func (m *Manager) Get(storeName, configName string) (*tls.Config, error) {
 	tlsConfig.GetCertificate = func(clientHello *tls.ClientHelloInfo) (*tls.Certificate, error) {
 		domainToCheck := types.CanonicalDomain(clientHello.ServerName)
 
+		// The stores are looked up on every handshake, and not captured when the
+		// configuration is built, so that a TLS configuration handed out before a
+		// configuration update never serves the certificates of a previous store.
+		store, acmeTLSStore := m.currentStores(storeName)
+
 		if slices.Contains(clientHello.SupportedProtos, tlsalpn01.ACMETLS1Protocol) {
-			certificate := acmeTLSStore.GetBestCertificate(clientHello)
-			if certificate == nil {
+			// The ACME challenge certificate is selected by name only: the validation
+			// client is not a regular traffic client, and its capabilities must not
+			// get in the way of the challenge.
+			certificateData, _ := acmeTLSStore.getBestCertificate(clientHello, false)
+			if certificateData == nil {
 				log.Debug().Msgf("TLS: no certificate for TLSALPN challenge: %s", domainToCheck)
 				// We want the user to eventually get the (alertUnrecognizedName) "unrecognized name" error.
 				// Unfortunately, if we returned an error here,
@@ -266,16 +280,16 @@ func (m *Manager) Get(storeName, configName string) (*tls.Config, error) {
 				return nil, nil
 			}
 
-			return certificate, nil
+			return certificateData.Certificate, nil
 		}
 
-		bestCertificate := store.GetBestCertificate(clientHello)
+		bestCertificate, reason := store.getBestCertificate(clientHello, true)
 		if bestCertificate != nil {
-			return bestCertificate, nil
+			return bestCertificate.Certificate, nil
 		}
 
 		if sniStrict {
-			log.Debug().Msgf("TLS: strict SNI enabled - No certificate found for domain: %q, closing connection", domainToCheck)
+			log.Debug().Str("reason", reason).Msgf("TLS: strict SNI enabled - No certificate found for domain: %q, closing connection", domainToCheck)
 			// Same comment as above, as in the isACMETLS case.
 			return nil, nil
 		}
@@ -287,9 +301,20 @@ func (m *Manager) Get(storeName, configName string) (*tls.Config, error) {
 			return nil, nil
 		}
 
-		log.Debug().Msgf("Serving default certificate for request: %q", domainToCheck)
+		defaultCertificate := store.GetDefaultCertificate()
+		if !certificateUsableByClient(clientHello, defaultCertificate) {
+			// The client cannot use the default certificate: serving it anyway would
+			// only let the handshake fail on the client side, without any hint about
+			// the actual cause on this side.
+			log.Debug().Str("reason", reasonNoAcceptableCertificate).Msgf("TLS: no certificate for domain %q is acceptable by the client, and the default certificate is not either, closing connection", domainToCheck)
 
-		return store.GetDefaultCertificate(), nil
+			// Same comment as above, as in the isACMETLS case.
+			return nil, nil
+		}
+
+		log.Debug().Str("reason", reason).Msgf("Serving default certificate for request: %q", domainToCheck)
+
+		return defaultCertificate, nil
 	}
 
 	return tlsConfig, err
@@ -310,20 +335,16 @@ func (m *Manager) GetServerCertificates() map[string]*x509.Certificate {
 	}
 
 	// We iterate over all the certificates.
-	if defaultStore.DynamicCerts != nil && defaultStore.DynamicCerts.Get() != nil {
-		certs, ok := defaultStore.DynamicCerts.Get().(map[string]*CertificateData)
-		if ok {
-			for _, cert := range certs {
-				// Use Leaf if available (it should always be populated by parseCertificate)
-				if cert.Certificate.Leaf == nil {
-					log.Warn().Msg("TLS: certificate Leaf is nil, skipping certificate in API response")
-					continue
-				}
-				hash := sha256.Sum256(cert.Certificate.Leaf.Raw)
-				fingerprint := hex.EncodeToString(hash[:])
-				certificates[fingerprint] = cert.Certificate.Leaf
-			}
+	for _, entry := range defaultStore.dynamicCertificates().entries {
+		cert := entry.data
+		// Use Leaf if available (it should always be populated by parseCertificate)
+		if cert.Certificate.Leaf == nil {
+			log.Warn().Msg("TLS: certificate Leaf is nil, skipping certificate in API response")
+			continue
 		}
+		hash := sha256.Sum256(cert.Certificate.Leaf.Raw)
+		fingerprint := hex.EncodeToString(hash[:])
+		certificates[fingerprint] = cert.Certificate.Leaf
 	}
 
 	if defaultStore.DefaultCertificate != nil {
@@ -351,6 +372,15 @@ func (m *Manager) GetStore(storeName string) *CertificateStore {
 	defer m.lock.RUnlock()
 
 	return m.getStore(storeName)
+}
+
+// currentStores returns the certificate store of a given name, and the ACME
+// challenge store, as they are at the time of the call.
+func (m *Manager) currentStores(storeName string) (store, acmeTLSStore *CertificateStore) {
+	m.lock.RLock()
+	defer m.lock.RUnlock()
+
+	return m.getStore(storeName), m.getStore(tlsalpn01.ACMETLS1Protocol)
 }
 
 // getStore returns the store found for storeName, or nil otherwise.

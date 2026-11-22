@@ -85,7 +85,7 @@ func TestTLSInStore(t *testing.T) {
 	tlsManager := NewManager(nil)
 	tlsManager.UpdateConfigs(t.Context(), nil, nil, dynamicConfigs)
 
-	certs := tlsManager.GetStore("default").DynamicCerts.Get().(map[string]*CertificateData)
+	certs := tlsManager.GetStore("default").dynamicCertificates().entries
 	if len(certs) == 0 {
 		t.Fatal("got error: default store must have TLS certificates.")
 	}
@@ -108,7 +108,7 @@ func TestTLSInvalidStore(t *testing.T) {
 			},
 		}, nil, dynamicConfigs)
 
-	certs := tlsManager.GetStore("default").DynamicCerts.Get().(map[string]*CertificateData)
+	certs := tlsManager.GetStore("default").dynamicCertificates().entries
 	if len(certs) == 0 {
 		t.Fatal("got error: default store must have TLS certificates.")
 	}

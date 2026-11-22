@@ -58,16 +58,20 @@ func TestGetBestCertificate(t *testing.T) {
 	for _, test := range testCases {
 		t.Run(test.desc, func(t *testing.T) {
 			t.Parallel()
-			dynamicMap := map[string]*CertificateData{}
 
+			var dynamicCerts []*certificateEntry
 			if test.dynamicCert != "" {
 				cert, err := loadTestCert(test.dynamicCert, test.uppercase)
 				require.NoError(t, err)
-				dynamicMap[strings.ToLower(test.dynamicCert)] = &CertificateData{Certificate: cert}
+				dynamicCerts = []*certificateEntry{{
+					data:       &CertificateData{Certificate: cert},
+					domains:    []string{strings.ToLower(test.dynamicCert)},
+					domainsKey: strings.ToLower(test.dynamicCert),
+				}}
 			}
 
 			store := &CertificateStore{
-				DynamicCerts: safe.New(dynamicMap),
+				DynamicCerts: safe.New(&certificateSet{entries: dynamicCerts}),
 				CertCache:    cache.New(1*time.Hour, 10*time.Minute),
 			}
 
@@ -78,9 +82,7 @@ func TestGetBestCertificate(t *testing.T) {
 				expected = cert
 			}
 
-			clientHello := &tls.ClientHelloInfo{
-				ServerName: test.domainToCheck,
-			}
+			clientHello := newTestClientHello(test.domainToCheck)
 
 			actual := store.GetBestCertificate(clientHello)
 			assert.Equal(t, expected, actual)
@@ -88,26 +90,66 @@ func TestGetBestCertificate(t *testing.T) {
 	}
 }
 
+// newTestClientHello returns a ClientHelloInfo advertising the capabilities of a
+// client that supports every certificate family Traefik can serve.
+func newTestClientHello(serverName string) *tls.ClientHelloInfo {
+	var cipherSuites []uint16
+	for _, suite := range tls.CipherSuites() {
+		cipherSuites = append(cipherSuites, suite.ID)
+	}
+
+	return &tls.ClientHelloInfo{
+		ServerName: serverName,
+		SupportedVersions: []uint16{
+			tls.VersionTLS13,
+			tls.VersionTLS12,
+		},
+		CipherSuites: cipherSuites,
+		SignatureSchemes: []tls.SignatureScheme{
+			tls.PSSWithSHA256,
+			tls.PKCS1WithSHA256,
+			tls.ECDSAWithP256AndSHA256,
+			tls.Ed25519,
+		},
+		SupportedCurves: []tls.CurveID{
+			tls.X25519,
+			tls.CurveP256,
+			tls.CurveP384,
+			tls.CurveP521,
+		},
+	}
+}
+
 // TestGetBestCertificate_SharedSAN ensures the selection stays deterministic
 // when distinct certificates share a SAN matching the server name (https://github.com/traefik/traefik/issues/13286).
 func TestGetBestCertificate_SharedSAN(t *testing.T) {
-	wildcardCert := &CertificateData{Certificate: &tls.Certificate{}}
-	exactCert := &CertificateData{Certificate: &tls.Certificate{}}
+	wildcardCert := newTestCertificateData(t, testKeyRSA, "*.app.example.test", "app.example.test")
+	exactCert := newTestCertificateData(t, testKeyRSA, "app.example.test")
 
 	// Both certificates have a SAN matching app.example.test, but the exact-only
 	// certificate must always win as its identifier sorts last.
 	for range 100 {
-		dynamicMap := map[string]*CertificateData{
-			"*.app.example.test,app.example.test": wildcardCert,
-			"app.example.test":                    exactCert,
+		dynamicCerts := []*certificateEntry{
+			{
+				data:        wildcardCert,
+				domains:     []string{"*.app.example.test", "app.example.test"},
+				domainsKey:  "*.app.example.test,app.example.test",
+				fingerprint: certificateFingerprint(wildcardCert.Certificate),
+			},
+			{
+				data:        exactCert,
+				domains:     []string{"app.example.test"},
+				domainsKey:  "app.example.test",
+				fingerprint: certificateFingerprint(exactCert.Certificate),
+			},
 		}
 
 		store := &CertificateStore{
-			DynamicCerts: safe.New(dynamicMap),
+			DynamicCerts: safe.New(&certificateSet{entries: dynamicCerts}),
 			CertCache:    cache.New(1*time.Hour, 10*time.Minute),
 		}
 
-		clientHello := &tls.ClientHelloInfo{ServerName: "app.example.test"}
+		clientHello := newTestClientHello("app.example.test")
 		assert.Same(t, exactCert.Certificate, store.GetBestCertificate(clientHello))
 	}
 }
